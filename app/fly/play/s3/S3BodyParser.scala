@@ -35,12 +35,6 @@ object S3BodyParser {
     (Cont[Array[Byte], Array[Byte]](i => step(Array())(i)))
   }
 
-  // public API
-
-  def apply(bucket: Bucket, fileName: String) = {
-
-  }
-
   // my own type
 
   private sealed trait ProcessingIntermediate
@@ -108,16 +102,23 @@ object S3BodyParser {
     }
   }
 
-  // first bodyparser
-  private def getBodyParser(fileName: String, contentType: String, bucket: Bucket) = BodyParser(rh => uploadsChunks(fileName, contentType, bucket).mapDone(r => {
-    val rr: Either[SimpleResult, PointerToBucketFile] = r match {
-      case Right(r) => Right(r)
-      case Left(s3ex) => Left(InternalServerError)
-    }
-    rr
-  }))
-
   
+  // public API
+  def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]), s3ErrorHandler: (S3Exception => SimpleResult)) = {
+    BodyParser(rh =>
+      uploadRigthsChecker(rh) match {
+        case Left(sr) => Done(Left(sr))
+        case Right(_) => {
+          uploadsChunks(namer(rh), rh.contentType.getOrElse("application/octet-stream"), bucket).mapDone(r => {
+            val rr: Either[SimpleResult, PointerToBucketFile] = r match {
+              case Right(r) => Right(r)
+              case Left(s3ex) => Left(s3ErrorHandler(s3ex))
+            }
+            rr
+          })
+        }
+      })
+  }
 
 }
 
