@@ -251,6 +251,9 @@ case class BucketItem(name: String, isVirtual: Boolean)
  */
 case class BucketFile(name: String, contentType: String, content: Array[Byte] = Array.empty, acl: Option[ACL] = None, headers: Option[Map[String, String]] = None)
 
+// prepresentation of a file in the bucket, without fetching it
+case class PointerToBucketFile(name: String, contentType: String)
+
 case class BucketFileUploadTicket(name: String, uploadId: String)
 
 case class BucketFilePart(partNumber: Int, content: Array[Byte])
