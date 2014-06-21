@@ -12,6 +12,7 @@ import play.api.mvc.SimpleResult
 import play.api.mvc.RequestHeader
 import play.api.mvc.SimpleResult
 import play.api.mvc.SimpleResult
+import play.api.mvc.SimpleResult
 
 object S3BodyParser {
 
@@ -102,9 +103,12 @@ object S3BodyParser {
     }
   }
 
-  
+  // utils
+  private def goForIt(rh: RequestHeader): Either[SimpleResult, Unit] = Right(Unit)
+  private def defaultErrorHandler(s3ex: S3Exception) = InternalServerError
+
   // public API
-  def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]), s3ErrorHandler: (S3Exception => SimpleResult)) = {
+  def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt, s3ErrorHandler: (S3Exception => SimpleResult) = defaultErrorHandler): BodyParser[PointerToBucketFile] = {
     BodyParser(rh =>
       uploadRigthsChecker(rh) match {
         case Left(sr) => Done(Left(sr))
