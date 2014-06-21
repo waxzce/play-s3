@@ -13,6 +13,9 @@ import play.api.mvc.RequestHeader
 import play.api.mvc.SimpleResult
 import play.api.mvc.SimpleResult
 import play.api.mvc.SimpleResult
+import play.api.mvc.BodyParsers.parse
+import play.api.mvc.BodyParsers.parse.Multipart.FileInfo
+import java.util.UUID
 
 object S3BodyParser {
 
@@ -106,6 +109,7 @@ object S3BodyParser {
   // utils
   private def goForIt(rh: RequestHeader): Either[SimpleResult, Unit] = Right(Unit)
   private def defaultErrorHandler(s3ex: S3Exception) = InternalServerError
+  private def defaultFileNamer(fi: FileInfo) = UUID.randomUUID.toString + "/" + fi.fileName
 
   // public API
   def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt, s3ErrorHandler: (S3Exception => SimpleResult) = defaultErrorHandler): BodyParser[PointerToBucketFile] = {
@@ -122,6 +126,16 @@ object S3BodyParser {
           })
         }
       })
+  }
+
+  def s3MultipartFormBodyParser(bucket: Bucket, namer: (FileInfo => String) = defaultFileNamer, uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt) = parse.using {
+    rh: RequestHeader =>
+      uploadRigthsChecker(rh) match {
+        case Left(sr) => BodyParser(rh => Done(Left(sr)))
+        case Right(_) => parse.multipartFormData(parse.Multipart.handleFilePart(fi => {
+          uploadsChunks(namer(fi), fi.contentType.getOrElse("application/octet-stream"), bucket)
+        }))
+      }
   }
 
 }
