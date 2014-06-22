@@ -16,6 +16,7 @@ import play.api.mvc.SimpleResult
 import play.api.mvc.BodyParsers.parse
 import play.api.mvc.BodyParsers.parse.Multipart.FileInfo
 import java.util.UUID
+import java.text.Normalizer
 
 object S3BodyParser {
 
@@ -43,17 +44,17 @@ object S3BodyParser {
 
   private sealed trait ProcessingIntermediate
 
-  private case class AdirectPutObject(fileName: String) extends ProcessingIntermediate
+  private case class AdirectPutObject(fileName: String, length:Int) extends ProcessingIntermediate
 
-  private case class ACurrentMultipart(parts: List[BucketFilePartUploadTicket]) extends ProcessingIntermediate
+  private case class ACurrentMultipart(parts: List[BucketFilePartUploadTicket], length:Int) extends ProcessingIntermediate
   private case class AnError(s3error: S3Exception) extends ProcessingIntermediate
 
   // define my iteratee
   private def iterateeUploading(bfut: BucketFileUploadTicket, bucket: Bucket, keyName: String, contentType: String): Iteratee[Array[Byte], ProcessingIntermediate] = {
     def step(acc: ProcessingIntermediate)(input: Input[Array[Byte]]): Iteratee[Array[Byte], ProcessingIntermediate] = acc match {
-      case AdirectPutObject(x) => Done(acc)
+      case AdirectPutObject(x,l) => Done(acc)
       case AnError(x) => Done(acc)
-      case ACurrentMultipart(parts) => {
+      case ACurrentMultipart(parts, length) => {
         input match {
           case Input.EOF => Done(acc)
           case Input.Empty => (Cont[Array[Byte], ProcessingIntermediate](i => step(acc)(i)))
@@ -67,19 +68,27 @@ object S3BodyParser {
                     case S3Exception(status, code, message, originalXml) => Done(AnError(S3Exception(status, code, message, originalXml)))
                   })
                   .map(
-                    unit => Done(AdirectPutObject(keyName)))
+                    unit => Done(AdirectPutObject(keyName, ds)))
+              }else if (ds < partSize && parts.isEmpty) {
+                // ACL here To do
+                (bucket.add(BucketFile(keyName, contentType, data)))
+                  .recover({
+                    case S3Exception(status, code, message, originalXml) => Done(AnError(S3Exception(status, code, message, originalXml)))
+                  })
+                  .map(
+                    unit => Done(AdirectPutObject(keyName, ds)))
               } else {
                 (
                   bucket uploadPart (bfut, BucketFilePart(parts.size + 1, data))).recover({
                     case S3Exception(status, code, message, originalXml) => Done(AnError(S3Exception(status, code, message, originalXml)))
-                  }).map(ticket => (Cont[Array[Byte], ProcessingIntermediate](i => step(ACurrentMultipart(parts :+ ticket.asInstanceOf[BucketFilePartUploadTicket]))(i))))
+                  }).map(ticket => (Cont[Array[Byte], ProcessingIntermediate](i => step(ACurrentMultipart(parts :+ ticket.asInstanceOf[BucketFilePartUploadTicket], length + ds))(i))))
               }
             }
           }
         }
       }
     }
-    (Cont[Array[Byte], ProcessingIntermediate](i => step(ACurrentMultipart(List[BucketFilePartUploadTicket]()))(i)))
+    (Cont[Array[Byte], ProcessingIntermediate](i => step(ACurrentMultipart(List[BucketFilePartUploadTicket](), 0))(i)))
   }
 
   // main function for iteratee usage
@@ -90,15 +99,15 @@ object S3BodyParser {
       bucket.initiateMultipartUpload(BucketFile(fileName, contentType)).map(bfut => {
         Enumeratee.grouped[Array[Byte]](qualifyChunks) &>> iterateeUploading(bfut, bucket, keyName, contentType).map(iterateeResult => iterateeResult match {
           case AnError(s3error) => Left(s3error)
-          case AdirectPutObject(po) =>
-            Right(PointerToBucketFile(po, contentType))
-          case ACurrentMultipart(parts) => {
+          case AdirectPutObject(po, length) =>
+            Right(PointerToBucketFile(po, contentType, length))
+          case ACurrentMultipart(parts, length) => {
             val r = bucket.completeMultipartUpload(bfut, parts)
               .recover({
                 case S3Exception(status, code, message, originalXml) => (Left(S3Exception(status, code, message, originalXml)))
               })
               .map(
-                unit => (Right(PointerToBucketFile(keyName, contentType))))
+                unit => (Right(PointerToBucketFile(keyName, contentType, length))))
             Await.result(r, 5 minutes)
           }
         })
@@ -107,9 +116,13 @@ object S3BodyParser {
   }
 
   // utils
+  private def normalizeString(st: String) = {
+    val ascii = Normalizer.normalize(st, Normalizer.Form.NFKD) filter (_ < 128)
+    ascii.toLowerCase map { c => if(c.isLetterOrDigit) c else '-' }
+  }
   private def goForIt(rh: RequestHeader): Either[SimpleResult, Unit] = Right(Unit)
   private def defaultErrorHandler(s3ex: S3Exception) = InternalServerError
-  private def defaultFileNamer(fi: FileInfo) = UUID.randomUUID.toString + "/" + fi.fileName
+  private def defaultFileNamer(fi: FileInfo) = UUID.randomUUID.toString + "/" + normalizeString(fi.fileName)
 
   // public API
   def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt, s3ErrorHandler: (S3Exception => SimpleResult) = defaultErrorHandler): BodyParser[PointerToBucketFile] = {
