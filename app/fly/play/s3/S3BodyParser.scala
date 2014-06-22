@@ -69,7 +69,7 @@ object S3BodyParser {
                   })
                   .map(
                     unit => Done(AdirectPutObject(keyName, ds)))
-              }else if (ds < partSize && parts.isEmpty) {
+              }else if (ds < partSize-1 && parts.isEmpty) {
                 // ACL here To do
                 (bucket.add(BucketFile(keyName, contentType, data)))
                   .recover({
