@@ -50,7 +50,7 @@ object S3BodyParser {
   private case class AnError(s3error: S3Exception) extends ProcessingIntermediate
 
   // define my iteratee
-  private def iterateeUploading(bfut: BucketFileUploadTicket, bucket: Bucket, keyName: String, contentType: String): Iteratee[Array[Byte], ProcessingIntermediate] = {
+  private def iterateeUploading(bfut: BucketFileUploadTicket, bucket: Bucket, keyName: String, contentType: String, acl:Option[ACL]): Iteratee[Array[Byte], ProcessingIntermediate] = {
     def step(acc: ProcessingIntermediate)(input: Input[Array[Byte]]): Iteratee[Array[Byte], ProcessingIntermediate] = acc match {
       case AdirectPutObject(x,l) => Done(acc)
       case AnError(x) => Done(acc)
@@ -63,7 +63,7 @@ object S3BodyParser {
             Iteratee.flatten {
               if (ds == 0 && parts.isEmpty) {
                 // ACL here To do
-                (bucket.add(BucketFile(keyName, contentType, Array[Byte]())))
+                (bucket.add(BucketFile(keyName, contentType, Array[Byte](), acl=acl)))
                   .recover({
                     case S3Exception(status, code, message, originalXml) => Done(AnError(S3Exception(status, code, message, originalXml)))
                   })
@@ -71,7 +71,7 @@ object S3BodyParser {
                     unit => Done(AdirectPutObject(keyName, ds)))
               }else if (ds < partSize-1 && parts.isEmpty) {
                 // ACL here To do
-                (bucket.add(BucketFile(keyName, contentType, data)))
+                (bucket.add(BucketFile(keyName, contentType, data, acl=acl)))
                   .recover({
                     case S3Exception(status, code, message, originalXml) => Done(AnError(S3Exception(status, code, message, originalXml)))
                   })
@@ -92,12 +92,12 @@ object S3BodyParser {
   }
 
   // main function for iteratee usage
-  private def uploadsChunks(fileName: String, contentType: String, bucket: Bucket): Iteratee[Array[Byte], Either[S3Exception, PointerToBucketFile]] = {
+  private def uploadsChunks(fileName: String, contentType: String, bucket: Bucket, acl:Option[ACL]): Iteratee[Array[Byte], Either[S3Exception, PointerToBucketFile]] = {
 
     val keyName = fileName
     Iteratee.flatten {
-      bucket.initiateMultipartUpload(BucketFile(fileName, contentType)).map(bfut => {
-        Enumeratee.grouped[Array[Byte]](qualifyChunks) &>> iterateeUploading(bfut, bucket, keyName, contentType).map(iterateeResult => iterateeResult match {
+      bucket.initiateMultipartUpload(BucketFile(fileName, contentType, acl=acl)).map(bfut => {
+        Enumeratee.grouped[Array[Byte]](qualifyChunks) &>> iterateeUploading(bfut, bucket, keyName, contentType, acl).map(iterateeResult => iterateeResult match {
           case AnError(s3error) => Left(s3error)
           case AdirectPutObject(po, length) =>
             Right(PointerToBucketFile(po, contentType, length))
@@ -125,12 +125,12 @@ object S3BodyParser {
   private def defaultFileNamer(fi: FileInfo) = UUID.randomUUID.toString + "/" + normalizeString(fi.fileName)
 
   // public API
-  def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt, s3ErrorHandler: (S3Exception => SimpleResult) = defaultErrorHandler): BodyParser[PointerToBucketFile] = {
+  def apply(bucket: Bucket, namer: (RequestHeader => String), uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt, s3ErrorHandler: (S3Exception => SimpleResult) = defaultErrorHandler, acl:Option[ACL] = None): BodyParser[PointerToBucketFile] = {
     BodyParser(rh =>
       uploadRigthsChecker(rh) match {
         case Left(sr) => Done(Left(sr))
         case Right(_) => {
-          uploadsChunks(namer(rh), rh.contentType.getOrElse("application/octet-stream"), bucket).mapDone(r => {
+          uploadsChunks(namer(rh), rh.contentType.getOrElse("application/octet-stream"), bucket, acl).mapDone(r => {
             val rr: Either[SimpleResult, PointerToBucketFile] = r match {
               case Right(r) => Right(r)
               case Left(s3ex) => Left(s3ErrorHandler(s3ex))
@@ -141,12 +141,12 @@ object S3BodyParser {
       })
   }
 
-  def s3MultipartFormBodyParser(bucket: Bucket, namer: (FileInfo => String) = defaultFileNamer, uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt) = parse.using {
+  def s3MultipartFormBodyParser(bucket: Bucket, namer: (FileInfo => String) = defaultFileNamer, uploadRigthsChecker: (RequestHeader => Either[SimpleResult, Unit]) = goForIt, acl:Option[ACL] = None) = parse.using {
     rh: RequestHeader =>
       uploadRigthsChecker(rh) match {
         case Left(sr) => BodyParser(rh => Done(Left(sr)))
         case Right(_) => parse.multipartFormData(parse.Multipart.handleFilePart(fi => {
-          uploadsChunks(namer(fi), fi.contentType.getOrElse("application/octet-stream"), bucket)
+          uploadsChunks(namer(fi), fi.contentType.getOrElse("application/octet-stream"), bucket, acl)
         }))
       }
   }
